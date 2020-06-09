@@ -3,6 +3,8 @@
 namespace VoyagerThemes;
 
 use Illuminate\Http\Request;
+use Mcamara\LaravelLocalization\Facades\LaravelLocalization;
+use Nwidart\Modules\Facades\Module;
 use TCG\Voyager\Models\Menu;
 use TCG\Voyager\Models\Role;
 use TCG\Voyager\Models\MenuItem;
@@ -13,13 +15,16 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Route;
 
 class VoyagerThemesServiceProvider extends ServiceProvider
 {
     private $models = [
-            'Theme',
-            'ThemeOptions',
-        ];
+        'Theme',
+        'ThemeOptions',
+    ];
+
+    private $moduleName;
 
     /**
      * Register is loaded every time the voyager themes hook is used.
@@ -28,23 +33,24 @@ class VoyagerThemesServiceProvider extends ServiceProvider
      */
     public function register()
     {
-        if (request()->is(config('voyager.prefix')) || request()->is(config('voyager.prefix').'/*')) {
-            $this->addThemesTable();
 
-            app(Dispatcher::class)->listen('voyager.menu.display', function ($menu) {
-                $this->addThemeMenuItem($menu);
-            });
 
-            app(Dispatcher::class)->listen('voyager.admin.routing', function ($router) {
-                $this->addThemeRoutes($router);
-            });
-        }
+        $this->addThemesTable();
+
+        app(Dispatcher::class)->listen('voyager.menu.display', function ($menu) {
+            $this->addThemeMenuItem($menu);
+        });
+
+        app(Dispatcher::class)->listen('voyager.admin.routing', function ($router) {
+            $this->addThemeRoutes($router);
+        });
+
 
         // publish config
-        $this->publishes([dirname(__DIR__).'/config/themes.php' => config_path('themes.php')], 'voyager-themes-config');
+        $this->publishes([dirname(__DIR__) . '/config/themes.php' => config_path('themes.php')], 'voyager-themes-config');
 
         // load helpers
-        @include __DIR__.'/helpers.php';
+        @include __DIR__ . '/helpers.php';
     }
 
     /**
@@ -54,9 +60,10 @@ class VoyagerThemesServiceProvider extends ServiceProvider
      */
     public function boot()
     {
-        try{
+        try {
 
-            $this->loadViewsFrom(__DIR__.'/../resources/views', 'themes');
+            $this->loadModels();
+            $this->loadViewsFrom(__DIR__ . '/../resources/views', 'themes');
 
             $theme = '';
 
@@ -64,9 +71,9 @@ class VoyagerThemesServiceProvider extends ServiceProvider
                 $theme = $this->rescue(function () {
                     return \VoyagerThemes\Models\Theme::where('active', '=', 1)->first();
                 });
-                if(Cookie::get('voyager_theme')){
-                    $theme_cookied = \VoyagerThemes\Models\Theme::where('folder', '=', Cookie::get('voyager_theme'))->first();
-                    if(isset($theme_cookied->id)){
+                if (Cookie::get('voyager_theme')) {
+                    $theme_cookied = \VoyagerThemes\Models\Theme::where('folder', '=', Crypt::decrypt(Cookie::get('voyager_theme')))->first();
+                    if (isset($theme_cookied->id)) {
                         $theme = $theme_cookied;
                     }
                 }
@@ -74,17 +81,25 @@ class VoyagerThemesServiceProvider extends ServiceProvider
 
             view()->share('theme', $theme);
 
-            $this->themes_folder = config('themes.themes_folder', resource_path('views/themes'));
-
-            $this->loadDynamicMiddleware($this->themes_folder, $theme);
-
-            // Make sure we have an active theme
-            if (isset($theme)) {
-                $this->loadViewsFrom($this->themes_folder.'/'.@$theme->folder, 'theme');
+            /**
+             * This will loop throw enabled modules
+             * It will compare request PREFIX defined in routes.php file for each module
+             * If it returns true then this module will be the on which the user is on it right now
+             * SO we will add it to theme path.
+             */
+            foreach (Module::getByStatus(1) as $module) {
+                $this->themes_folder = base_path('Modules') . DIRECTORY_SEPARATOR . $module->getName() . DIRECTORY_SEPARATOR . 'Resources' . DIRECTORY_SEPARATOR . 'themes' . DIRECTORY_SEPARATOR . @$theme->folder . DIRECTORY_SEPARATOR . 'views';
+                $this->loadDynamicMiddleware($this->themes_folder, $theme);
+                $this->app['view']->addNamespace('theme-' . strtolower($module->getName()), $this->themes_folder);
             }
-            $this->loadViewsFrom($this->themes_folder, 'themes_folder');
 
-        } catch(\Exception $e){
+            // This will get main theme path in resources folder
+            $this->themes_folder2 = config('themes.themes_folder', resource_path('views/themes')) . DIRECTORY_SEPARATOR . @$theme->folder . DIRECTORY_SEPARATOR . 'views';
+            $this->app['view']->addNamespace('theme', $this->themes_folder2);
+
+            // * This helps for theme options page to work correctly
+            $this->app['view']->addNamespace('themes_folder', config('themes.themes_folder', resource_path('views/themes')));
+        } catch (\Exception $e) {
             return $e->getMessage();
         }
     }
@@ -97,14 +112,14 @@ class VoyagerThemesServiceProvider extends ServiceProvider
     public function addThemeRoutes($router)
     {
         $namespacePrefix = '\\VoyagerThemes\\Http\\Controllers\\';
-        $router->get('themes', ['uses' => $namespacePrefix.'ThemesController@index', 'as' => 'theme.index']);
-        $router->get('themes/activate/{theme}', ['uses' => $namespacePrefix.'ThemesController@activate', 'as' => 'theme.activate']);
-        $router->get('themes/options/{theme}', ['uses' => $namespacePrefix.'ThemesController@options', 'as' => 'theme.options']);
-        $router->post('themes/options/{theme}', ['uses' => $namespacePrefix.'ThemesController@options_save', 'as' => 'theme.options.post']);
+        $router->get('themes', ['uses' => $namespacePrefix . 'ThemesController@index', 'as' => 'theme.index']);
+        $router->get('themes/activate/{theme}', ['uses' => $namespacePrefix . 'ThemesController@activate', 'as' => 'theme.activate']);
+        $router->get('themes/options/{theme}', ['uses' => $namespacePrefix . 'ThemesController@options', 'as' => 'theme.options']);
+        $router->post('themes/options/{theme}', ['uses' => $namespacePrefix . 'ThemesController@options_save', 'as' => 'theme.options.post']);
         $router->get('themes/options', function () {
             return redirect(route('voyager.theme.index'));
         });
-        $router->delete('themes/delete', ['uses' => $namespacePrefix.'ThemesController@delete', 'as' => 'theme.delete']);
+        $router->delete('themes/delete', ['uses' => $namespacePrefix . 'ThemesController@delete', 'as' => 'theme.delete']);
     }
 
     /**
@@ -136,6 +151,18 @@ class VoyagerThemesServiceProvider extends ServiceProvider
     }
 
     /**
+     * Loads all models in the src/Models folder.
+     *
+     * @return none
+     */
+    private function loadModels()
+    {
+        foreach ($this->models as $model) {
+            @include __DIR__ . '/Models/' . $model . '.php';
+        }
+    }
+
+    /**
      * Add Permissions for themes if they do not exist yet.
      *
      * @return none
@@ -155,18 +182,19 @@ class VoyagerThemesServiceProvider extends ServiceProvider
         }
     }
 
-    private function loadDynamicMiddleware($themes_folder, $theme){
+    private function loadDynamicMiddleware($themes_folder, $theme)
+    {
         if (empty($theme)) {
             return;
         }
         $middleware_folder = $themes_folder . '/' . $theme->folder . '/middleware';
-        if(file_exists( $middleware_folder )){
+        if (file_exists($middleware_folder)) {
             $middleware_files = scandir($middleware_folder);
-            foreach($middleware_files as $middleware){
-                if($middleware != '.' && $middleware != '..'){
+            foreach ($middleware_files as $middleware) {
+                if ($middleware != '.' && $middleware != '..') {
                     include($middleware_folder . '/' . $middleware);
                     $middleware_classname = 'VoyagerThemes\\Middleware\\' . str_replace('.php', '', $middleware);
-                    if(class_exists($middleware_classname)){
+                    if (class_exists($middleware_classname)) {
                         // Dynamically Load The Middleware
                         $this->app->make('Illuminate\Contracts\Http\Kernel')->prependMiddleware($middleware_classname);
                     }
